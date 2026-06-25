@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 SERVER_NAME = "mule-cli"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.1.0"
 DEFAULT_PROTOCOL = "2025-06-18"
 CONTAINER = "mule-mldonkey"
 
