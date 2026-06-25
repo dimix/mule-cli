@@ -1,0 +1,424 @@
+#!/usr/bin/env python3
+"""
+mule — a small CLI front-end over an MLDonkey daemon (ed2k / Kad / BitTorrent).
+
+The heavy networking is done by MLDonkey running in a Docker container
+(see `mule daemon ...`). This CLI just talks to MLDonkey's telnet console
+on 127.0.0.1:4000 and exposes a handful of clean, scriptable commands.
+
+Designed to be usable both by a human and by an automated agent: every
+data command supports `--json`.
+"""
+
+import argparse
+import json
+import re
+import socket
+import subprocess
+import sys
+import time
+
+HOST = "127.0.0.1"
+PORT = 4000
+CONTAINER = "mule-mldonkey"
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+PROMPT_RE = re.compile(r"MLdonkey command-line:\s*\n?>\s*$")
+
+
+# --------------------------------------------------------------------------
+# Low-level console transport
+# --------------------------------------------------------------------------
+class Console:
+    def __init__(self, host=HOST, port=PORT, timeout=8.0):
+        self.sock = socket.create_connection((host, port), timeout=timeout)
+        self.sock.settimeout(0.6)
+        self._drain(initial=True)  # swallow the welcome banner
+
+    def _drain(self, initial=False, idle=0.45, hard=12.0):
+        """Read until the socket goes idle for `idle` seconds."""
+        buf = b""
+        start = time.time()
+        last = time.time()
+        while True:
+            try:
+                d = self.sock.recv(8192)
+                if not d:
+                    break
+                buf += d
+                last = time.time()
+            except socket.timeout:
+                if time.time() - last >= idle:
+                    break
+                if time.time() - start >= hard:
+                    break
+        return self._clean(buf)
+
+    @staticmethod
+    def _clean(raw):
+        # strip telnet IAC negotiation bytes
+        raw = bytes(b for b in raw if b < 0xF0)
+        text = raw.decode("utf-8", errors="replace")
+        text = ANSI_RE.sub("", text)
+        return text
+
+    def cmd(self, command):
+        self.sock.sendall((command + "\n").encode("utf-8"))
+        time.sleep(0.15)
+        out = self._drain()
+        # remove the echoed command line and the trailing prompt noise
+        lines = out.splitlines()
+        cleaned = []
+        for ln in lines:
+            s = ln.strip()
+            if s == command.strip():
+                continue
+            if s.startswith("> " + command.strip()) or s == ">":
+                continue
+            if "MLdonkey command-line:" in s:
+                continue
+            cleaned.append(ln.rstrip())
+        # drop leading '> ' fragments
+        text = "\n".join(cleaned)
+        text = re.sub(r"^>\s*", "", text)
+        return text.strip("\n")
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def console():
+    try:
+        return Console()
+    except (ConnectionRefusedError, OSError) as e:
+        die(f"Cannot reach MLDonkey console on {HOST}:{PORT} ({e}).\n"
+            f"Is the daemon running?  Try:  mule daemon status")
+
+
+def die(msg, code=1):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def out(data, as_json):
+    if as_json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+    else:
+        print(data if isinstance(data, str) else json.dumps(data, indent=2,
+              ensure_ascii=False))
+
+
+# --------------------------------------------------------------------------
+# Parsing helpers for MLDonkey console output
+# --------------------------------------------------------------------------
+def human_size(n):
+    n = float(n)
+    for unit in ("B", "K", "M", "G", "T"):
+        if n < 1024 or unit == "T":
+            return (f"{n:.0f}{unit}" if unit == "B" or n >= 100
+                    else f"{n:.1f}{unit}")
+        n /= 1024
+    return f"{n:.0f}T"
+
+
+def parse_results(text):
+    """Parse real MLDonkey `vr` output. Data lines look like:
+       [     1] 2475489612     1        filename.avi    xvid Video   urn:ed2k:F689...
+    Columns are padded with runs of 2+ spaces; the filename itself uses
+    single spaces, so we split columns on `\\s{2,}`.
+    """
+    results = []
+    total = None
+    for ln in text.splitlines():
+        tm = re.match(r"\s*(\d+)\s+results", ln)
+        if tm:
+            total = int(tm.group(1))
+            continue
+        m = re.match(r"\[\s*(\d+)\]\s+(\d+)\s+(\d+)\s+(.*)", ln)
+        if not m:
+            continue
+        idx = int(m.group(1))
+        size_bytes = int(m.group(2))
+        avail = int(m.group(3))
+        rest = m.group(4).rstrip()
+        cols = re.split(r"\s{2,}", rest.strip())
+        name = cols[0] if cols else rest.strip()
+        hm = re.search(r"ed2k:([0-9A-Fa-f]{32})", rest)
+        md4 = hm.group(1).upper() if hm else ""
+        results.append({
+            "id": idx,
+            "name": name,
+            "size": human_size(size_bytes),
+            "size_bytes": size_bytes,
+            "sources": avail,
+            "ed2k": md4,
+        })
+    return results, total
+
+
+STATE_NAMES = {"D": "downloading", "P": "paused", "Q": "queued",
+               "F": "finished", "C": "connecting"}
+
+
+def parse_downloads(text):
+    """Parse real MLDonkey `vd` output. Data lines look like:
+       [D   1] -    0 admin mldonkey  Some File Name.mkv   0.0   0b   1.8gb  ...
+    Layout: [<state><num>] Rele Comm User Group <name>  %  Done  Size  ...
+    The name can contain spaces; trailing columns are padded with 2+ spaces.
+    """
+    downloads = []
+    rate = None
+    for ln in text.splitlines():
+        rm = re.match(r"Down:\s*([\d.]+\s*\w+/s)", ln)
+        if rm:
+            rate = rm.group(1)
+            continue
+        m = re.match(r"\[(\w)\s*(\d+)\]\s+(.*)", ln)
+        if not m:
+            continue
+        state, num, rest = m.group(1), int(m.group(2)), m.group(3)
+        toks = rest.split(None, 4)              # drop Rele Comm User Group
+        remainder = toks[4] if len(toks) >= 5 else rest
+        cols = re.split(r"\s{2,}", remainder.strip())
+        name = cols[0] if cols else remainder.strip()
+        percent = cols[1] + "%" if len(cols) > 1 and re.match(r"\d+\.\d+$", cols[1]) else ""
+        size = cols[3] if len(cols) > 3 else ""
+        downloads.append({
+            "id": num,
+            "state": STATE_NAMES.get(state, state),
+            "name": name,
+            "percent": percent,
+            "size": size,
+        })
+    return downloads, rate
+
+
+# --------------------------------------------------------------------------
+# Daemon (docker) management
+# --------------------------------------------------------------------------
+def docker(*args, capture=True):
+    return subprocess.run(["docker", *args], capture_output=capture, text=True)
+
+
+def cmd_daemon(a):
+    action = a.action
+    if action == "status":
+        r = docker("ps", "-a", "--filter", f"name={CONTAINER}",
+                   "--format", "{{.Names}}\t{{.Status}}")
+        line = r.stdout.strip()
+        running = "Up" in line
+        if a.json:
+            out({"container": CONTAINER, "running": running, "status": line}, True)
+        else:
+            print(line or f"(no container named {CONTAINER})")
+        sys.exit(0 if running else 2)
+    elif action == "start":
+        docker("start", CONTAINER, capture=False)
+    elif action == "stop":
+        docker("stop", CONTAINER, capture=False)
+    elif action == "restart":
+        docker("restart", CONTAINER, capture=False)
+    elif action == "logs":
+        docker("logs", "--tail", "40", CONTAINER, capture=False)
+
+
+# --------------------------------------------------------------------------
+# High-level commands
+# --------------------------------------------------------------------------
+def cmd_console(a):
+    c = console()
+    print(c.cmd(" ".join(a.command)))
+    c.close()
+
+
+def cmd_net(a):
+    c = console()
+    servers = c.cmd("vm")
+    kad = c.cmd("kad_stats")
+    c.close()
+    kad_ok = "Got enough online peers" in kad
+    srv_line = servers.splitlines()[0] if servers else ""
+    if a.json:
+        out({"kad_connected": kad_ok, "servers": srv_line,
+             "kad_raw": kad, "servers_raw": servers}, True)
+    else:
+        print("=== ed2k servers ===\n" + servers)
+        print("\n=== Kad (serverless) ===")
+        print("status: " + ("CONNECTED ✅" if kad_ok else "not ready ⏳"))
+        print(kad)
+
+
+def _print_results(res, limit):
+    res = sorted(res, key=lambda r: r["sources"], reverse=True)
+    if limit:
+        res = res[:limit]
+    print(f"{'id':>7} {'size':>7} {'src':>6}  name")
+    print(f"{'-'*7} {'-'*7} {'-'*6}  {'-'*40}")
+    for r in res:
+        src = f"{r['sources']}src"
+        print(f"[{r['id']:>5}] {r['size']:>7} {src:>6}  {r['name']}")
+
+
+def cmd_search(a):
+    c = console()
+    query = " ".join(a.query)
+    c.cmd("s " + query)
+    # Kad searches take ~30-60s; poll vr until it reports "(done)".
+    waited, interval = 0, 3
+    text = ""
+    while waited < a.wait:
+        time.sleep(interval)
+        waited += interval
+        text = c.cmd("vr")
+        if "(done)" in text:
+            break
+    res, total = parse_results(text)
+    c.close()
+    if a.json:
+        out({"query": query, "count": len(res), "total": total,
+             "results": sorted(res, key=lambda r: r["sources"], reverse=True)}, True)
+    else:
+        if not res:
+            print(f"No results for '{query}'. ed2k/Kad indexes mostly media "
+                  f"files; try different keywords, or check `mule net`.")
+            return
+        _print_results(res, a.limit)
+        print(f"\n{len(res)} results (sorted by sources). "
+              f"Download with: mule download <id>")
+
+
+def cmd_results(a):
+    c = console()
+    res, total = parse_results(c.cmd("vr"))
+    c.close()
+    if a.json:
+        out({"count": len(res),
+             "results": sorted(res, key=lambda r: r["sources"], reverse=True)}, True)
+    else:
+        _print_results(res, a.limit)
+
+
+def cmd_download(a):
+    c = console()
+    msgs = []
+    for idx in a.ids:
+        msgs.append(c.cmd(f"d {idx}"))
+    c.close()
+    out({"requested": a.ids, "responses": msgs} if a.json
+        else "\n".join(msgs), a.json)
+
+
+def cmd_downloads(a):
+    c = console()
+    dls, rate = parse_downloads(c.cmd("vd"))
+    c.close()
+    if a.json:
+        out({"count": len(dls), "rate": rate, "downloads": dls}, True)
+    else:
+        if not dls:
+            print("No active downloads.")
+            return
+        print(f"Down rate: {rate or 'n/a'}")
+        for d in dls:
+            print(f"[{d['id']:>3}] {d['percent']:>6} {d['size']:>7} "
+                  f"{d['state']:>11}  {d['name']}")
+
+
+def _simple(cmdname):
+    def fn(a):
+        c = console()
+        res = []
+        for idx in a.ids:
+            res.append(c.cmd(f"{cmdname} {idx}"))
+        c.close()
+        print("\n".join(res))
+    return fn
+
+
+def cmd_cancel(a):
+    c = console()
+    out_lines = []
+    for idx in a.ids:
+        c.cmd(f"cancel {idx}")          # queues the cancel, asks for confirm
+        out_lines.append(c.cmd("confirm yes"))
+    c.close()
+    print("\n".join(l for l in out_lines if l) or "cancelled")
+
+
+def cmd_commit(a):
+    c = console()
+    print(c.cmd("commit"))
+    c.close()
+
+
+# --------------------------------------------------------------------------
+# argparse wiring
+# --------------------------------------------------------------------------
+def build_parser():
+    p = argparse.ArgumentParser(prog="mule", description="ed2k/Kad downloader CLI over MLDonkey")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    d = sub.add_parser("daemon", help="manage the MLDonkey docker container")
+    d.add_argument("action", choices=["status", "start", "stop", "restart", "logs"])
+    d.add_argument("--json", action="store_true")
+    d.set_defaults(func=cmd_daemon)
+
+    co = sub.add_parser("console", help="send a raw MLDonkey console command")
+    co.add_argument("command", nargs="+")
+    co.set_defaults(func=cmd_console)
+
+    n = sub.add_parser("net", help="network/connection status")
+    n.add_argument("--json", action="store_true")
+    n.set_defaults(func=cmd_net)
+
+    s = sub.add_parser("search", help="search the networks")
+    s.add_argument("query", nargs="+")
+    s.add_argument("--wait", type=int, default=35, help="seconds to wait for results")
+    s.add_argument("--limit", type=int, default=25, help="max rows to show (0=all)")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_search)
+
+    r = sub.add_parser("results", help="show results of the last search")
+    r.add_argument("--limit", type=int, default=25, help="max rows to show (0=all)")
+    r.add_argument("--json", action="store_true")
+    r.set_defaults(func=cmd_results)
+
+    dl = sub.add_parser("download", help="download result(s) by id")
+    dl.add_argument("ids", nargs="+", type=int)
+    dl.add_argument("--json", action="store_true")
+    dl.set_defaults(func=cmd_download)
+
+    ds = sub.add_parser("downloads", help="show active downloads")
+    ds.add_argument("--json", action="store_true")
+    ds.set_defaults(func=cmd_downloads)
+
+    for name in ("pause", "resume"):
+        sp = sub.add_parser(name, help=f"{name} download(s) by id")
+        sp.add_argument("ids", nargs="+", type=int)
+        sp.set_defaults(func=_simple(name))
+
+    cx = sub.add_parser("cancel", help="cancel download(s) by id")
+    cx.add_argument("ids", nargs="+", type=int)
+    cx.set_defaults(func=cmd_cancel)
+
+    cm = sub.add_parser("commit", help="move completed files to the incoming folder")
+    cm.set_defaults(func=cmd_commit)
+
+    return p
+
+
+def main():
+    p = build_parser()
+    a = p.parse_args()
+    a.func(a)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nInterrotto.", file=sys.stderr)
+        sys.exit(130)

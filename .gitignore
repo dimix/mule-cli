@@ -1,0 +1,9 @@
+# MLDonkey runtime data: downloads, partial files, local config, ipfilter, etc.
+# NEVER commit this — it contains your downloads and machine-specific state.
+data/
+
+# OS / editor cruft
+.DS_Store
+*.swp
+__pycache__/
+*.pyc

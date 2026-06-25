@@ -1,0 +1,11 @@
+# Known ed2k servers, loaded by install.sh (and re-addable by hand).
+# Format:  <ip> <port>   # name
+# The classic server.met lists are mostly dead; these were alive 2026-06.
+# The first one is large and reliable (~23M files, ~45k users).
+
+45.82.80.155 5687      # eMule Security  (most loaded)
+176.123.5.89 4725      # eMule Sunrise
+91.208.162.87 4232     # Sharing-Devils
+145.239.2.134 4661     # GrupoTS
+176.125.231.98 18357   # Akteon N02
+37.15.60.69 4232       # Mazinga
