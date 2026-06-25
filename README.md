@@ -1,12 +1,12 @@
-# mule — ricerca e download da eMule (ed2k / Kad) via CLI
+# mule — search & download from eMule (ed2k / Kad) via CLI
 
-Una piccola CLI che pilota un motore **MLDonkey** headless (in Docker) per cercare
-e scaricare file dalle reti **ed2k** e **Kad** — senza nessuna app Mac con GUI.
-Output `--json` su ogni comando dati, così è usabile sia a mano sia da un agente.
+A tiny CLI that drives a headless **MLDonkey** engine (in Docker) to search and
+download files from the **ed2k** and **Kad** networks — with no GUI Mac app.
+Every data command supports `--json`, so it's usable both by hand and by an agent.
 
-## Installazione (macOS)
+## Install (macOS)
 
-Serve solo [Homebrew](https://brew.sh). Poi:
+You only need [Homebrew](https://brew.sh). Then:
 
 ```bash
 git clone https://github.com/dimix/mule-cli.git
@@ -14,132 +14,131 @@ cd mule-cli
 ./install.sh
 ```
 
-`install.sh` fa tutto: installa Colima + Docker, avvia il motore MLDonkey in un
-container, aggancia Kad e i server ed2k, e mette `mule` nel PATH. È idempotente
-(puoi rilanciarlo). Dopo, da qualsiasi cartella:
+`install.sh` does everything: installs Colima + Docker, starts the MLDonkey engine
+in a container, bootstraps Kad and the ed2k servers, and puts `mule` on your PATH.
+It's idempotent (safe to re-run). Afterwards, from any directory:
 
 ```bash
 mule search "big buck bunny"
 mule download <id>
 ```
 
-## Architettura
+## Architecture
 
 ```
-  ./mule  (Python, host)  ──telnet 127.0.0.1:4000──▶  MLDonkey (container Docker)
-                                                          │ ed2k + Kad (serverless)
-   download completati  ◀── ./data/incoming/files/ ◀──────┘
+  mule  (Python, host)  ──telnet 127.0.0.1:4000──▶  MLDonkey (Docker container)
+                                                        │ ed2k + Kad (serverless)
+   completed downloads  ◀── ./data/incoming/files/ ◀────┘
 ```
 
-- Il lavoro di rete (protocollo ed2k/Kad, hashing, code, sorgenti) lo fa MLDonkey.
-- La CLI manda comandi alla console di MLDonkey e ne ripulisce/parsa l'output.
-- Container: `mule-mldonkey` (immagine `carlonluca/mldonkey`, arm64 nativo).
-- Runtime container: **Colima** (VM Linux leggera installata via Homebrew).
+- The networking (ed2k/Kad protocol, hashing, queues, sources) is done by MLDonkey.
+- The CLI sends commands to MLDonkey's console and cleans up / parses the output.
+- Container: `mule-mldonkey` (image `carlonluca/mldonkey`, native arm64).
+- Container runtime: **Colima** (a lightweight Linux VM, installed via Homebrew).
 
-## Dove finiscono i file
+## Where files land
 
-| | percorso sul Mac |
+| | path on the Mac |
 |---|---|
-| Completati | `./data/incoming/files/` |
-| Parziali   | `./data/temp/` |
-| Config MLDonkey | `./data/*.ini` |
+| Completed | `./data/incoming/files/` |
+| Partial   | `./data/temp/` |
+| MLDonkey config | `./data/*.ini` |
 
-(`./data` è montato come `/var/lib/mldonkey` dentro il container.)
+(`./data` is mounted as `/var/lib/mldonkey` inside the container.)
 
-## Uso quotidiano
-
-```bash
-./mule net                       # stato reti (Kad connesso?)
-./mule search interstellar       # cerca (attende ~35s i risultati Kad)
-./mule search "big buck bunny" --limit 15
-./mule results                   # rimostra l'ultima ricerca
-./mule download 12               # scarica il risultato n. 12 (anche più id)
-./mule downloads                 # avanzamento dei download attivi
-./mule pause 1 / resume 1        # pausa / riprendi
-./mule cancel 1                  # annulla (gestisce la conferma da solo)
-./mule commit                    # sposta i completati in incoming/
-```
-
-Ogni comando dati accetta `--json`:
-```bash
-./mule search debian --json
-./mule downloads --json
-```
-
-Grimaldello per comandi MLDonkey grezzi (debug/avanzato):
-```bash
-./mule console "vma"             # lista tutti i server
-./mule console "kad_stats"
-```
-
-## Gestione del demone
+## Everyday use
 
 ```bash
-./mule daemon status             # è su?
-./mule daemon start|stop|restart
-./mule daemon logs
+mule net                       # network status (is Kad connected?)
+mule search interstellar       # search (waits ~35s for Kad results)
+mule search "big buck bunny" --limit 15
+mule results                   # re-show the last search
+mule download 12               # download result #12 (multiple ids allowed)
+mule downloads                 # progress of active downloads
+mule pause 1 / resume 1        # pause / resume
+mule cancel 1                  # cancel (handles the confirmation itself)
+mule commit                    # move completed files into incoming/
 ```
 
-## Dopo un riavvio del Mac
+Every data command accepts `--json`:
+```bash
+mule search debian --json
+mule downloads --json
+```
 
-Colima non parte da solo (a meno di `brew services start colima`). Quindi:
+Escape hatch for raw MLDonkey console commands (debug / advanced):
+```bash
+mule console "vma"             # list all servers
+mule console "kad_stats"
+```
+
+## Daemon management
 
 ```bash
-colima start                     # riavvia la VM Linux
-docker start mule-mldonkey       # il container ha restart=unless-stopped, parte da solo
-./mule net                       # verifica che Kad si riconnetta
+mule daemon status             # is it up?
+mule daemon start|stop|restart
+mule daemon logs
 ```
 
-## Bootstrap delle reti (se la ricerca smette di dare risultati)
+## After a Mac reboot
 
-ed2k/Kad vanno "agganciati" a dei peer. La config attuale è già impostata, ma se
-in futuro Kad non si connette più:
+Colima does not start on its own (unless you run `brew services start colima`):
 
 ```bash
-./mule console "kad_web"                                   # nodi Kad di default
-./mule console "urladd kad http://upd.emule-security.org/nodes.dat"
-./mule console "force_web_infos kad"
-./mule console "save"
+colima start                   # restart the Linux VM
+docker start mule-mldonkey     # the container has restart=unless-stopped
+mule net                       # check that Kad reconnects
 ```
 
-Per i **server ed2k** le liste automatiche (server.met) sono quasi tutte morte:
-meglio aggiungere a mano server vivi con `n <ip> <port>`. Questi risultavano
-funzionanti (giu 2026) — il primo regge ~23M di file:
+## Re-bootstrapping the networks (if searches stop returning results)
+
+ed2k/Kad need to be "hooked" to some peers. The setup already does this, but if
+Kad ever stops connecting:
 
 ```bash
-./mule console "n 45.82.80.155 5687"      # eMule Security  (il più carico)
-./mule console "n 176.123.5.89 4725"      # eMule Sunrise
-./mule console "n 91.208.162.87 4232"     # Sharing-Devils
-./mule console "n 145.239.2.134 4661"     # GrupoTS
-./mule console "c"                         # connetti
-./mule console "save"
+mule console "kad_web"                                   # default Kad nodes
+mule console "urladd kad http://upd.emule-security.org/nodes.dat"
+mule console "force_web_infos kad"
+mule console "save"
 ```
 
-Nota: l'ipfilter (`guarding.p2p`) può marcare dei server come "IP blocked".
+For **ed2k servers**, the automatic lists (server.met) are mostly dead, so it's
+better to add live servers by hand with `n <ip> <port>`. The ones in `servers.txt`
+were alive 2026-06 (the first one carries ~23M files):
 
-## Note
+```bash
+mule console "n 45.82.80.155 5687"      # eMule Security  (most loaded)
+mule console "n 176.123.5.89 4725"      # eMule Sunrise
+mule console "n 91.208.162.87 4232"     # Sharing-Devils
+mule console "c"                         # connect
+mule console "save"
+```
 
-- La rete ed2k/Kad indicizza **soprattutto file multimediali**: query tipo "ubuntu"
-  spesso danno 0 risultati. I risultati **non sono filtrati**.
-- I server ed2k classici sono quasi tutti morti: il download reale passa per **Kad**.
-- Dietro NAT senza port-forward avrai "LowID": funziona, ma più lento. Per "HighID"
-  va aperta sul router la porta TCP/UDP del container (19040/19044).
-- Scarica solo contenuti che hai il diritto di scaricare.
+Note: the ipfilter (`guarding.p2p`) may flag some servers as "IP blocked".
 
-## Stack installato
+## Notes
+
+- The ed2k/Kad network indexes **mostly media files**: queries like "ubuntu" often
+  return 0 results. Results are **not filtered**.
+- The classic ed2k servers are mostly dead; real downloads go through **Kad**.
+- Behind NAT without port-forwarding you get a "LowID": it works, but is slower.
+  For a "HighID", forward the container's TCP/UDP ports (19040/19044) on your router.
+- Only download content you have the right to download.
+
+## Installed stack
 
 - `brew install colima docker`
-- immagine `carlonluca/mldonkey` (porte: 4000 console, 4080 web, 19040/19044 p2p)
-- la CLI è solo `./mule` (Python 3, nessuna dipendenza esterna)
+- image `carlonluca/mldonkey` (ports: 4000 console, 4080 web, 19040/19044 p2p)
+- the CLI is just `mule` (Python 3, no external dependencies)
 
-## Disclaimer / uso lecito
+## Disclaimer / lawful use
 
-`mule-cli` è un **client** per le reti P2P ed2k/Kad — come aMule, eMule o un
-qualsiasi client BitTorrent. Non ospita né distribuisce alcun contenuto: si limita
-a parlare con una rete pubblica esistente.
+`mule-cli` is a **client** for the ed2k/Kad P2P networks — like aMule, eMule, or
+any BitTorrent client. It hosts and distributes nothing: it only talks to an
+existing public network.
 
-La responsabilità su **cosa** viene cercato e scaricato è interamente di chi usa lo
-strumento. Usalo solo per file che hai il diritto di scaricare (software libero,
-opere di pubblico dominio, contenuti tuoi o con licenza che lo permette) e nel
-rispetto delle leggi sul diritto d'autore del tuo paese. Il software è fornito
-"così com'è", senza garanzie (vedi `LICENSE`).
+Responsibility for **what** is searched and downloaded lies entirely with the
+person using the tool. Use it only for files you have the right to download (free
+software, public-domain works, your own content, or anything licensed to allow it),
+and in compliance with the copyright laws of your country. The software is provided
+"as is", without warranty (see `LICENSE`).
