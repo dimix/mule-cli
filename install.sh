@@ -111,6 +111,13 @@ fi
 "$MULE" console "c" >/dev/null
 "$MULE" console "save" >/dev/null
 
+# --- 8. Claude Code skill (only if this looks like a Claude user) ----------
+if [ -d "$HOME/.claude" ] && [ -f "$REPO_DIR/skills/mule/SKILL.md" ]; then
+  say "Installing Claude Code skill -> ~/.claude/skills/mule/"
+  mkdir -p "$HOME/.claude/skills/mule"
+  cp "$REPO_DIR/skills/mule/SKILL.md" "$HOME/.claude/skills/mule/SKILL.md"
+fi
+
 cat <<EOF
 
 $(say "Done.")
