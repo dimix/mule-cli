@@ -1,0 +1,34 @@
+{
+  "manifest_version": "0.2",
+  "name": "mule-cli",
+  "display_name": "mule — eMule (ed2k/Kad) downloader",
+  "version": "1.0.0",
+  "description": "Search and download files from the eMule ed2k/Kad networks. Wraps the `mule` CLI. Requires mule-cli to be installed on the machine first (see https://github.com/dimix/mule-cli).",
+  "long_description": "Exposes the mule ed2k/Kad downloader as MCP tools: ensure_engine, net, search, download, downloads, cancel, commit, download_path. The MLDonkey engine runs locally in Docker; this connector assumes mule-cli's install.sh has already set that up.",
+  "author": {
+    "name": "Dimitri Giani"
+  },
+  "homepage": "https://github.com/dimix/mule-cli",
+  "license": "MIT",
+  "server": {
+    "type": "python",
+    "entry_point": "server.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": ["${__dirname}/server.py"]
+    }
+  },
+  "tools": [
+    {"name": "mule_ensure_engine", "description": "Start the local MLDonkey engine if needed."},
+    {"name": "mule_net", "description": "Network status (Kad + ed2k servers)."},
+    {"name": "mule_search", "description": "Search the ed2k/Kad networks."},
+    {"name": "mule_download", "description": "Download result ids from the last search."},
+    {"name": "mule_downloads", "description": "List active downloads."},
+    {"name": "mule_cancel", "description": "Cancel downloads by id."},
+    {"name": "mule_commit", "description": "Finalize completed downloads."},
+    {"name": "mule_download_path", "description": "Host path where files land."}
+  ],
+  "compatibility": {
+    "platforms": ["darwin"]
+  }
+}

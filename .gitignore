@@ -2,6 +2,9 @@
 # NEVER commit this — it contains your downloads and machine-specific state.
 data/
 
+# Built MCP bundle artifact
+*.mcpb
+
 # OS / editor cruft
 .DS_Store
 *.swp

@@ -125,13 +125,18 @@ Note: the ipfilter (`guarding.p2p`) may flag some servers as "IP blocked".
   For a "HighID", forward the container's TCP/UDP ports (19040/19044) on your router.
 - Only download content you have the right to download.
 
-## Claude Code integration
+## AI integrations
 
-The repo ships a [Claude Code](https://claude.com/claude-code) skill at
-`skills/mule/SKILL.md`. `install.sh` copies it to `~/.claude/skills/mule/` (if you
-have `~/.claude`), so in any session you can just ask Claude to *"search / download
-X from eMule"* and it will start the engine, search, confirm, download, and report
-where the file landed.
+`mule` is built to be driven by AI agents — every data command speaks `--json`.
+
+- **Claude Code** — ships a skill at `skills/mule/SKILL.md`, auto-installed to
+  `~/.claude/skills/mule/` by `install.sh`. Just ask Claude to *"search / download X
+  from eMule"* and it handles engine start → search → download → reporting.
+- **Claude Desktop / Codex CLI / Cursor / any MCP client** — a zero-dependency MCP
+  server lives in `mcp/server.py`, exposing the same operations as typed tools.
+  See [`mcp/README.md`](mcp/README.md) for per-client config and a `.mcpb` one-click
+  bundle for Claude Desktop.
+- **Any shell-based agent** — see [`AGENTS.md`](AGENTS.md) for the plain-CLI playbook.
 
 ## Installed stack
 
